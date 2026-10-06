@@ -7,7 +7,7 @@ Retyping usernames from chat into logs gets old. This Forge 1.8.9 mod copies cha
 | Right-click a word | That word. Edge punctuation is stripped, so `Steve:` gives `Steve` |
 | Shift + right-click | The whole message, colour codes removed |
 
-A grey `Copied: ...` line confirms it. It's client-side only and sends nothing to the server.
+A grey `Copied: ...` line confirms it. Client-side only; nothing is sent to the server. Works on vanilla Forge and on Feather/Dawn, which move the chat around.
 
 ## Install
 

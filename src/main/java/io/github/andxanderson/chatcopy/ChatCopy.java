@@ -17,6 +17,8 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.relauncher.ReflectionHelper;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.lwjgl.input.Mouse;
 
 import java.util.List;
@@ -24,7 +26,11 @@ import java.util.List;
 @Mod(modid = "chatcopy", useMetadata = true, clientSideOnly = true)
 public class ChatCopy {
 
+    private static final String PREFIX = "Copied: ";
+    private static final Logger LOG = LogManager.getLogger("chatcopy");
+
     private final Minecraft mc = Minecraft.getMinecraft();
+    private long lastEvent;
 
     @Mod.EventHandler
     public void init(FMLInitializationEvent event) {
@@ -34,42 +40,77 @@ public class ChatCopy {
     @SubscribeEvent
     public void onMouse(GuiScreenEvent.MouseInputEvent.Pre event) {
         if (!(event.gui instanceof GuiChat) || Mouse.getEventButton() != 1 || !Mouse.getEventButtonState()) return;
+        // Some clients post this event twice per click; handle each mouse event once.
+        if (Mouse.getEventNanoseconds() == lastEvent) return;
+        lastEvent = Mouse.getEventNanoseconds();
 
+        int mouseX = Mouse.getEventX(), mouseY = Mouse.getEventY();
         GuiNewChat chat = mc.ingameGUI.getChatGUI();
-        ChatLine line = lineAt(chat, Mouse.getX(), Mouse.getY());
-        if (line == null) return;
 
-        String text = GuiScreen.isShiftKeyDown() ? fullMessage(chat, line) : wordAt(line, mouseChatX(chat));
+        // Ask the game what's under the cursor. Clients that move or restyle chat
+        // (Feather/Dawn) patch this method, so it stays correct where our own maths wouldn't.
+        IChatComponent hit = chat.getChatComponent(mouseX, mouseY);
+        if (hit == null) return;
+        ChatLine line = lineContaining(chat, hit);
+        if (line == null) {
+            LOG.info("No chat line matched component '{}'", hit.getUnformattedText());
+            return;
+        }
+
+        String plain = clean(line.getChatComponent().getUnformattedText());
+        if (plain.startsWith(PREFIX)) return;
+
+        String text = GuiScreen.isShiftKeyDown()
+                ? fullMessage(chat, line)
+                : wordAt(line, chatX(chat, mouseX, mouseY));
         if (text.isEmpty()) return;
 
         GuiScreen.setClipboardString(text);
-        mc.thePlayer.addChatMessage(new ChatComponentText("Copied: " + text)
+        mc.thePlayer.addChatMessage(new ChatComponentText(PREFIX + text)
                 .setChatStyle(new ChatStyle().setColor(EnumChatFormatting.GRAY)));
         event.setCanceled(true);
     }
 
-    // Same hit-test as GuiNewChat.getChatComponent, but returns the whole drawn line.
-    private ChatLine lineAt(GuiNewChat chat, int mouseX, int mouseY) {
-        List<ChatLine> drawn = ReflectionHelper.getPrivateValue(GuiNewChat.class, chat, "drawnChatLines", "field_146253_i");
-        int scrollPos = ReflectionHelper.getPrivateValue(GuiNewChat.class, chat, "scrollPos", "field_146250_j");
-
-        int scale = new ScaledResolution(mc).getScaleFactor();
-        float chatScale = chat.getChatScale();
-        int x = (int) Math.floor((mouseX / scale - 3) / chatScale);
-        int y = (int) Math.floor((mouseY / scale - 27) / chatScale);
-        if (x < 0 || y < 0) return null;
-
-        int visible = Math.min(chat.getLineCount(), drawn.size());
-        int fontHeight = mc.fontRendererObj.FONT_HEIGHT;
-        if (x > Math.floor(chat.getChatWidth() / chatScale) || y >= fontHeight * visible + visible) return null;
-
-        int index = y / fontHeight + scrollPos;
-        return index >= 0 && index < drawn.size() ? drawn.get(index) : null;
+    // Iterating a component yields copies, so getChatComponent's result is never the
+    // same object as anything in the line; match on contents instead.
+    @SuppressWarnings("unchecked")
+    private ChatLine lineContaining(GuiNewChat chat, IChatComponent hit) {
+        String hitText = hit.getUnformattedText();
+        for (List<ChatLine> lines : new List[]{usedLines(chat), drawnLines(chat)}) {
+            if (lines == null) continue;
+            for (ChatLine line : lines) {
+                for (IChatComponent part : line.getChatComponent()) {
+                    if (part.equals(hit) || (!hitText.isEmpty() && part.getUnformattedText().equals(hitText))) return line;
+                }
+            }
+        }
+        return null;
     }
 
-    private int mouseChatX(GuiNewChat chat) {
-        int scale = new ScaledResolution(mc).getScaleFactor();
-        return (int) Math.floor((Mouse.getX() / scale - 3) / chat.getChatScale());
+    private static List<ChatLine> drawnLines(GuiNewChat chat) {
+        return ReflectionHelper.getPrivateValue(GuiNewChat.class, chat, "drawnChatLines", "field_146253_i");
+    }
+
+    // Feather/Dawn chat tabs render a filtered copy of drawnChatLines from this method.
+    @SuppressWarnings("unchecked")
+    private static List<ChatLine> usedLines(GuiNewChat chat) {
+        try {
+            return (List<ChatLine>) chat.getClass().getMethod("getUsedTrimmedMessages").invoke(chat);
+        } catch (ReflectiveOperationException e) {
+            return null;
+        }
+    }
+
+    // Chat x in text pixels. The line's left edge is wherever getChatComponent first
+    // returns something on this row, which accounts for any offset the client adds.
+    private int chatX(GuiNewChat chat, int mouseX, int mouseY) {
+        int lo = 0, hi = mouseX;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (chat.getChatComponent(mid, mouseY) != null) hi = mid; else lo = mid + 1;
+        }
+        float pixelsPerUnit = new ScaledResolution(mc).getScaleFactor() * chat.getChatScale();
+        return (int) ((mouseX - lo) / pixelsPerUnit);
     }
 
     // Walks the line char by char, measuring rendered width, to find the word under x.
@@ -98,7 +139,7 @@ public class ChatCopy {
         while (end < plain.length() && !Character.isWhitespace(plain.charAt(end))) end++;
         String word = plain.substring(start, end);
 
-        // "Steve:" -> "Steve", "[MVP+]" stays as-is.
+        // "Steve:" -> "Steve", "<Steve>" -> "Steve", "[MVP+]" -> "MVP".
         String trimmed = word.replaceAll("^[^A-Za-z0-9_]+|[^A-Za-z0-9_]+$", "");
         return trimmed.isEmpty() ? word : trimmed;
     }
