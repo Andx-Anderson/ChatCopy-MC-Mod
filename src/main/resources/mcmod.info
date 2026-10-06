@@ -1,0 +1,11 @@
+[
+  {
+    "modid": "chatcopy",
+    "name": "ChatCopy",
+    "description": "Right-click a word in chat to copy it. Shift+right-click copies the whole message.",
+    "version": "${version}",
+    "mcversion": "1.8.9",
+    "url": "https://github.com/Andx-Anderson/ChatCopy-MC-Mod",
+    "authorList": ["Andx-Anderson"]
+  }
+]
